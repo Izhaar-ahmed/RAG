@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 
 interface Citation {
     document_name: string;
-    page_number: int;
+    page_number: number;
     text_snippet: string;
     score: number;
     upload_date?: string;
@@ -121,8 +121,8 @@ export default function ChatWindow() {
                 {messages.map((msg, idx) => (
                     <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                         <div className={`max-w-[80%] rounded-2xl px-5 py-4 ${msg.role === 'user'
-                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/10'
-                                : 'bg-zinc-900 border border-zinc-800 text-zinc-200'
+                            ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/10'
+                            : 'bg-zinc-900 border border-zinc-800 text-zinc-200'
                             }`}>
                             <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
 

@@ -2,7 +2,7 @@
 
 A privacy-first, verified "Enterprise-Grade" Retrieval-Augmented Generation system that runs **100% offline**.
 
-This platform allows users to ingest documents (PDFs, DOCX, TXT, Images, Excel), build a local Knowledge Graph + Vector Index, and chat with their data using a secure, air-gapped LLM (Phi-3). It features industry-standard security including **MongoDB** persistence and **JWT Authentication**.
+This platform allows users to ingest documents (PDFs, DOCX, TXT, Images, Excel), build a local Vector Index, and chat with their data using a secure, air-gapped LLM (Phi-3). It features industry-standard security including **MongoDB** persistence and **JWT Authentication**.
 
 ![Status](https://img.shields.io/badge/Status-Production_Ready-success)
 ![Security](https://img.shields.io/badge/Security-Air_Gapped-blue)
@@ -21,7 +21,7 @@ This platform allows users to ingest documents (PDFs, DOCX, TXT, Images, Excel),
 - **Multimodal Ingestion**:
   - **OCR**: Extracts text from scanned PDFs and Images using `Tesseract` & `img2table`.
   - **Spreadsheets**: Native support for `.xlsx` and `.csv` with row-wise context preservation.
-  - **Knowledge Graph**: Builds a semantic graph of entities to answer complex, multi-hop queries.
+
 - **Hybrid Search**: Combines Dense Vector Retrieval (FAISS) with Keyword Search (BM25) and Freshness Re-ranking.
 
 ### 💻 Modern Frontend
@@ -45,7 +45,7 @@ graph TD
         FastAPI -->|Auth| Auth[Auth Handler (Argon2)]
         FastAPI -->|Query| RAG[RAG Engine]
         RAG -->|Retrieval| FAISS[Vector Store]
-        RAG -->|Graph| KG[Knowledge Graph]
+
         RAG -->|Inference| LLM[Local LLM (Phi-3)]
         
         FastAPI -->|Persistence| Mongo[(MongoDB)]
@@ -99,7 +99,7 @@ npm run dev
 1. Navigate to the **Control Panel**.
 2. Drag & Drop documents (PDF, Excel, Images).
 3. Watch the **Processing Status**:
-   - *Chunking* -> *Embedding* -> *Graph Building*
+   - *Chunking* -> *Embedding* -> *Indexing*
 
 ### 3. Chat
 1. Ask questions in the **Intelligence Hub**.
