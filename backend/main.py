@@ -108,7 +108,7 @@ def health_check():
 @app.post("/upload")
 async def upload_document(
     file: UploadFile = File(...), 
-    current_user: User = Depends(require_admin) # CHANGED: Now requires Admin
+    current_user: User = Depends(auth.require_admin) # CHANGED: Now requires Admin
 ):
     # Enterprise Access Control: Enforced via require_admin dependency
 
