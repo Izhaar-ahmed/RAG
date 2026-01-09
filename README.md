@@ -86,9 +86,14 @@ npm run dev
 ## 📖 Usage Guide
 
 ### 1. Authentication
-1. Go to `/register` (or toggle "Register" on Login page).
-2. Create an admin account.
-3. Login to receive your secure session token.
+1. **Initial Setup**: Run the seeder script to create default accounts:
+   ```bash
+   python seed_users.py
+   ```
+2. **Login**:
+   - **Admin** (`admin@company.com` / `admin`): Access to Chat + **Knowledge Base (Uploads)**.
+   - **User** (`user@company.com` / `user`): Access to **Chat Only**.
+3. **Manual Promotion**: To make any new user an admin, run `python create_admin.py`.
 
 ### 2. Ingestion
 1. Navigate to the **Control Panel**.
