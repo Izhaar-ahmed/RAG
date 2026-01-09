@@ -15,9 +15,7 @@ export default function Home() {
           const data = await res.json();
           setModelStatus(data.model_loaded);
         }
-      } catch (e) {
-        // Silently fail
-      }
+      } catch (e) { }
     };
 
     checkStatus();
@@ -26,125 +24,165 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden font-sans selection:bg-indigo-500/30">
-      {/* Animated Background */}
-      <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
-        {/* Gradient orbs */}
-        <div className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] bg-indigo-600/10 rounded-full blur-[120px] animate-float" />
-        <div className="absolute bottom-[-20%] right-[-10%] w-[500px] h-[500px] bg-purple-600/10 rounded-full blur-[120px]" style={{ animationDelay: '2s' }} />
-        <div className="absolute top-[40%] right-[20%] w-[400px] h-[400px] bg-cyan-500/5 rounded-full blur-[100px] animate-float" style={{ animationDelay: '4s' }} />
-
-        {/* Grid overlay */}
-        <div className="absolute inset-0 bg-[linear-gradient(rgba(99,102,241,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(99,102,241,0.03)_1px,transparent_1px)] bg-[size:60px_60px]" />
-
-        {/* Noise texture */}
-        <div className="absolute inset-0 opacity-[0.015]" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg"%3E%3Cfilter id="noise"%3E%3CfeTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/%3E%3C/filter%3E%3Crect width="100%" height="100%" filter="url(%23noise)"/%3E%3C/svg%3E")' }} />
-      </div>
-
+    <main style={{
+      display: 'flex',
+      height: '100vh',
+      backgroundColor: '#0a0a0d',
+      color: '#e4e4e7',
+      overflow: 'hidden'
+    }}>
       {/* Sidebar */}
-      <div className="z-10 flex-shrink-0 relative">
-        <Sidebar />
-      </div>
+      <Sidebar />
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col h-full z-10 relative lg:flex-row">
+      <div style={{ flex: 1, display: 'flex', height: '100%' }}>
 
-        {/* Middle Column: Control Panel */}
-        <div className="lg:w-80 glass border-r border-white/5 p-6 flex flex-col gap-6 overflow-y-auto">
+        {/* Control Panel */}
+        <div style={{
+          width: '320px',
+          backgroundColor: '#0f0f14',
+          borderRight: '1px solid rgba(255,255,255,0.08)',
+          padding: '24px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '24px',
+          overflow: 'auto',
+          flexShrink: 0
+        }}>
           {/* Header */}
-          <header className="space-y-1">
-            <h2 className="text-2xl font-bold tracking-tight">
-              <span className="gradient-text">Control</span>
-              <span className="text-white/90"> Panel</span>
+          <div>
+            <h2 style={{ margin: 0, fontSize: '22px', fontWeight: 700, color: 'white' }}>
+              Control Panel
             </h2>
-            <p className="text-xs text-slate-500 font-medium">
+            <p style={{ margin: '6px 0 0 0', fontSize: '12px', color: '#71717a' }}>
               Manage your knowledge base
             </p>
-          </header>
+          </div>
 
           {/* Upload Section */}
-          <section>
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
-              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                Ingest Data
-              </h3>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }} />
+              <span style={{ fontSize: '11px', fontWeight: 600, color: '#71717a', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Upload Documents
+              </span>
             </div>
             <FileUpload />
-          </section>
+          </div>
 
           {/* System Status */}
-          <section className="mt-auto">
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+          <div style={{ marginTop: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+              <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#10b981' }} />
+              <span style={{ fontSize: '11px', fontWeight: 600, color: '#71717a', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 System Status
-              </h3>
+              </span>
             </div>
 
-            <div className="glass-light rounded-2xl p-5 space-y-4">
-              {/* LLM Status */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 flex items-center justify-center">
-                    <svg className="w-4 h-4 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            <div style={{
+              backgroundColor: '#18181d',
+              borderRadius: '12px',
+              border: '1px solid rgba(255,255,255,0.08)',
+              padding: '16px'
+            }}>
+              {/* Neural Engine */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '10px',
+                    backgroundColor: 'rgba(168,85,247,0.15)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <svg style={{ width: '18px', height: '18px', color: '#a855f7' }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                     </svg>
                   </div>
                   <div>
-                    <p className="text-sm font-medium text-white">Neural Engine</p>
-                    <p className="text-[10px] text-slate-500">Phi-3 Mini (4K)</p>
+                    <p style={{ margin: 0, fontSize: '13px', fontWeight: 600, color: 'white' }}>Neural Engine</p>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '10px', color: '#52525b' }}>Phi-3 Mini (4K)</p>
                   </div>
                 </div>
-                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full ${modelStatus ? 'bg-emerald-500/10' : 'bg-amber-500/10'
-                  }`}>
-                  <div className={`w-1.5 h-1.5 rounded-full ${modelStatus ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400 animate-pulse'
-                    }`} />
-                  <span className={`text-[10px] font-semibold ${modelStatus ? 'text-emerald-400' : 'text-amber-400'
-                    }`}>
-                    {modelStatus ? 'Ready' : 'Loading'}
+                <span style={{
+                  padding: '4px 10px',
+                  borderRadius: '20px',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  backgroundColor: modelStatus ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)',
+                  color: modelStatus ? '#34d399' : '#fbbf24'
+                }}>
+                  {modelStatus ? 'Ready' : 'Loading'}
+                </span>
+              </div>
+
+              {/* Vector Store */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '10px',
+                    backgroundColor: 'rgba(6,182,212,0.15)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <svg style={{ width: '18px', height: '18px', color: '#22d3ee' }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p style={{ margin: 0, fontSize: '13px', fontWeight: 600, color: 'white' }}>Vector Store</p>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '10px', color: '#52525b' }}>FAISS Index</p>
+                  </div>
+                </div>
+                <span style={{
+                  padding: '4px 10px',
+                  borderRadius: '20px',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  backgroundColor: 'rgba(6,182,212,0.15)',
+                  color: '#22d3ee'
+                }}>
+                  Active
+                </span>
+              </div>
+
+              {/* Privacy Notice */}
+              <div style={{ paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <svg style={{ width: '14px', height: '14px', color: '#52525b' }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  </svg>
+                  <span style={{ fontSize: '11px', color: '#52525b', fontWeight: 500 }}>
+                    Air-gapped • Zero telemetry
                   </span>
                 </div>
               </div>
-
-              {/* Vector DB Status */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 flex items-center justify-center">
-                    <svg className="w-4 h-4 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="text-sm font-medium text-white">Vector Store</p>
-                    <p className="text-[10px] text-slate-500">FAISS Index</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-cyan-500/10">
-                  <div className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                  <span className="text-[10px] font-semibold text-cyan-400">Active</span>
-                </div>
-              </div>
-
-              {/* Privacy Badge */}
-              <div className="pt-3 border-t border-white/5">
-                <div className="flex items-center gap-2 text-slate-600">
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                  </svg>
-                  <span className="text-[10px] font-medium">Air-gapped • Zero telemetry</span>
-                </div>
-              </div>
             </div>
-          </section>
+          </div>
         </div>
 
-        {/* Right Column: Chat */}
-        <div className="flex-1 h-full min-h-0">
+        {/* Chat Area */}
+        <div style={{ flex: 1, height: '100%' }}>
           <ChatWindow />
         </div>
 
       </div>
+
+      {/* Add spin animation */}
+      <style jsx global>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+        @keyframes bounce {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-4px); }
+        }
+      `}</style>
     </main>
   );
 }
