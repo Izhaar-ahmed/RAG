@@ -1,223 +1,147 @@
 "use client";
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 
-interface IngestionStatus {
-    status: "idle" | "uploading" | "chunking" | "graph_building" | "indexing" | "processing" | "complete" | "ready" | "error";
-    current_block?: number;
-    total_blocks?: number;
+interface ProgressData {
+    status: string;
+    current_block: number;
+    total_blocks: number;
     message: string;
-    percent?: number;
-    progress?: number;
+    percent: number;
 }
 
 export default function FileUpload() {
-    const { token, user } = useAuth();
-    const isAdmin = user?.role === 'admin';
+    const { token } = useAuth();
     const [isDragging, setIsDragging] = useState(false);
-    const [uploading, setUploading] = useState(false);
-    const [status, setStatus] = useState<string | null>(null);
-    const [progress, setProgress] = useState(0);
-    const [progressMessage, setProgressMessage] = useState<string>('');
-    const [isGraphBuilding, setIsGraphBuilding] = useState(false);
-    const fileInputRef = useRef<HTMLInputElement>(null);
-    const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const [progress, setProgress] = useState<ProgressData | null>(null);
+    const [error, setError] = useState('');
 
-    useEffect(() => {
-        return () => {
-            if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
+    const pollProgress = useCallback(async () => {
+        try {
+            const res = await fetch('http://127.0.0.1:8000/ingestion/status');
+            const data = await res.json();
+            setProgress(data);
+
+            if (data.status === 'processing' || data.status === 'indexing') {
+                setTimeout(pollProgress, 500);
+            } else if (data.status === 'complete') {
+                setTimeout(() => setProgress(null), 3000); // Clear after 3s
             }
-        };
+        } catch (e) {
+            // Ignore polling errors
+        }
     }, []);
 
-    const pollIngestionStatus = () => {
-        pollIntervalRef.current = setInterval(async () => {
-            try {
-                const res = await fetch('http://127.0.0.1:8000/ingestion/status');
-                if (res.ok) {
-                    const data: IngestionStatus = await res.json();
-                    const progressValue = data.progress ?? data.percent ?? 0;
+    const handleUpload = async (files: FileList | null) => {
+        if (!files || files.length === 0) return;
 
-                    if (data.status === 'processing' || data.status === 'chunking') {
-                        setProgress(progressValue);
-                        setProgressMessage(data.message);
-                    } else if (data.status === 'graph_building') {
-                        setProgress(progressValue);
-                        setProgressMessage(data.message || 'Building Knowledge Graph...');
-                        setIsGraphBuilding(true);
-                    } else if (data.status === 'complete' || data.status === 'ready') {
-                        setProgress(100);
-                        setProgressMessage('Complete!');
-                        setIsGraphBuilding(false);
-                    }
-                }
-            } catch (e) { }
-        }, 1000);
-    };
-
-    const stopPolling = () => {
-        if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current);
-            pollIntervalRef.current = null;
-        }
-    };
-
-    const uploadFile = async (file: File) => {
-        if (!token) return;
-        setUploading(true);
-        setStatus(null);
-        setProgress(0);
-        setProgressMessage('Starting upload...');
-        setIsGraphBuilding(false);
-        pollIngestionStatus();
-
+        setError('');
+        const file = files[0]; // Single file for now
         const formData = new FormData();
         formData.append('file', file);
 
         try {
-            const res = await fetch(`http://127.0.0.1:8000/upload`, {
+            // Optimistic progress start
+            setProgress({
+                status: 'uploading',
+                current_block: 0,
+                total_blocks: 100,
+                message: 'Uploading file...',
+                percent: 10
+            });
+
+            const res = await fetch('http://127.0.0.1:8000/upload', {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${token}`
                 },
-                body: formData,
+                body: formData
             });
 
-            if (res.ok) {
-                const data = await res.json();
-                stopPolling();
-                setProgress(50);
-                setProgressMessage(`Indexed ${data.chunks} chunks. Starting Knowledge Graph...`);
+            if (!res.ok) throw new Error('Upload failed');
 
-                const pollUntilReady = setInterval(async () => {
-                    try {
-                        const statusRes = await fetch('http://127.0.0.1:8000/ingestion/status');
-                        if (statusRes.ok) {
-                            const statusData = await statusRes.json();
-                            const progressValue = statusData.progress ?? statusData.percent ?? 50;
+            // Start polling for ingestion progress
+            pollProgress();
 
-                            if (statusData.status === 'graph_building') {
-                                setProgress(progressValue);
-                                setProgressMessage(statusData.message || 'Building Knowledge Graph...');
-                                setIsGraphBuilding(true);
-                            } else if (statusData.status === 'ready') {
-                                clearInterval(pollUntilReady);
-                                stopPolling();
-                                setProgress(100);
-                                setProgressMessage('Complete!');
-                                setIsGraphBuilding(false);
-                                setStatus(`success:${data.chunks} chunks indexed. Knowledge Graph built.`);
-                                setTimeout(() => {
-                                    setStatus(null);
-                                    setProgress(0);
-                                    setProgressMessage('');
-                                    setUploading(false);
-                                }, 3000);
-                            }
-                        }
-                    } catch (e) { }
-                }, 1000);
-
-                setTimeout(() => {
-                    clearInterval(pollUntilReady);
-                    stopPolling();
-                    setUploading(false);
-                }, 300000);
-
-            } else {
-                stopPolling();
-                setStatus('error:Upload failed');
-                setUploading(false);
-            }
-        } catch (error) {
-            stopPolling();
-            setStatus('error:Connection failed');
-            setUploading(false);
+        } catch (err: any) {
+            setError(err.message);
+            setProgress(null);
         }
     };
 
-    if (!isAdmin) {
-        return (
-            <div className="p-6 text-center bg-bg-tertiary rounded-xl border border-border-subtle">
-                <div className="w-12 h-12 mx-auto mb-4 rounded-xl bg-gray-500/10 flex items-center justify-center">
-                    <svg className="w-6 h-6 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                    </svg>
-                </div>
-                <p className="m-0 text-sm font-semibold text-gray-400">Admin Access Required</p>
-                <p className="mt-1.5 text-xs text-gray-600">Sign in to upload files</p>
-            </div>
-        );
-    }
+    const onDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        setIsDragging(true);
+    };
+
+    const onDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        setIsDragging(false);
+    };
+
+    const onDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        setIsDragging(false);
+        handleUpload(e.dataTransfer.files);
+    };
 
     return (
-        <div
-            onClick={() => fileInputRef.current?.click()}
-            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={(e) => {
-                e.preventDefault();
-                setIsDragging(false);
-                if (e.dataTransfer.files?.[0]) uploadFile(e.dataTransfer.files[0]);
-            }}
-            className={`
-                p-8 text-center rounded-xl border-2 border-dashed cursor-pointer transition-all duration-200
-                ${isDragging
-                    ? 'bg-accent-indigo/10 border-accent-indigo'
-                    : 'bg-bg-tertiary border-border-default hover:bg-bg-hover hover:border-accent-indigo/50'}
-            `}
-        >
-            <input
-                type="file"
-                ref={fileInputRef}
-                onChange={(e) => e.target.files?.[0] && uploadFile(e.target.files[0])}
-                accept=".pdf,.docx,.txt"
-                className="hidden"
-            />
+        <div className="space-y-6">
+            <div
+                className={`border-2 border-dashed rounded-2xl p-12 text-center transition-all cursor-pointer ${isDragging
+                        ? 'border-indigo-500 bg-indigo-500/10'
+                        : 'border-zinc-800 bg-zinc-900/50 hover:bg-zinc-900 hover:border-zinc-700'
+                    }`}
+                onDragOver={onDragOver}
+                onDragLeave={onDragLeave}
+                onDrop={onDrop}
+                onClick={() => document.getElementById('fileInput')?.click()}
+            >
+                <input
+                    type="file"
+                    id="fileInput"
+                    className="hidden"
+                    onChange={(e) => handleUpload(e.target.files)}
+                    accept=".pdf,.docx,.txt,.csv,.xlsx,.xls,image/*"
+                />
 
-            <div className={`
-                w-14 h-14 mx-auto mb-4 rounded-2xl flex items-center justify-center
-                ${uploading ? 'bg-accent-indigo/20' : 'bg-accent-indigo/10'}
-            `}>
-                {uploading ? (
-                    <div className="w-6 h-6 border-2 border-accent-indigo/30 border-t-accent-indigo rounded-full animate-spin" />
-                ) : (
-                    <svg className="w-7 h-7 text-accent-indigo" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                <div className="w-16 h-16 mx-auto mb-4 bg-zinc-800 rounded-full flex items-center justify-center">
+                    <svg className="w-8 h-8 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                     </svg>
-                )}
+                </div>
+                <h3 className="text-lg font-semibold mb-2">Drop documents here</h3>
+                <p className="text-zinc-500 text-sm">PDF, Excel, Images, Word</p>
+                <p className="text-zinc-600 text-xs mt-4">Max file size 50MB</p>
             </div>
 
-            <p className="m-0 text-sm font-semibold text-white">
-                {uploading ? 'Processing...' : 'Drop files here'}
-            </p>
-            <p className="mt-1.5 text-xs text-gray-500">
-                {uploading ? progressMessage : 'PDF, DOCX, TXT supported'}
-            </p>
-
-            {uploading && (
-                <div className="mt-4">
-                    <div className="h-1 bg-accent-indigo/20 rounded-full overflow-hidden relative">
-                        <div
-                            className={`h-full transition-all duration-300 rounded-full ${isGraphBuilding ? 'bg-gradient-to-r from-accent-purple via-accent-cyan to-accent-purple bg-[length:200%_100%] animate-gradient-x' : 'bg-gradient-to-r from-accent-indigo to-accent-purple'}`}
-                            style={{ width: `${progress}%` }}
-                        />
-                    </div>
-                    <p className={`mt-2 text-[11px] font-medium ${isGraphBuilding ? 'text-accent-cyan' : 'text-gray-500'}`}>
-                        {isGraphBuilding ? '🧠 ' : ''}{progressMessage} ({progress}%)
-                    </p>
+            {error && (
+                <div className="p-4 bg-red-900/20 border border-red-900/50 rounded-lg text-red-300 text-sm flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    {error}
                 </div>
             )}
 
-            {status && (
-                <div className={`
-                    mt-4 px-4 py-2 rounded-full inline-block text-xs font-medium
-                    ${status.startsWith('success')
-                        ? 'bg-accent-emerald/15 text-accent-emerald'
-                        : 'bg-red-500/15 text-red-400'}
-                `}>
-                    {status.split(':')[1]}
+            {progress && (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 shadow-lg">
+                    <div className="flex justify-between items-center mb-3">
+                        <span className="font-semibold text-sm text-zinc-200">Processing Status</span>
+                        <span className="text-xs font-mono text-indigo-400">{progress.status.toUpperCase()}</span>
+                    </div>
+
+                    <div className="w-full bg-zinc-800 h-2 rounded-full overflow-hidden mb-3">
+                        <div
+                            className="bg-indigo-600 h-full transition-all duration-500 ease-out"
+                            style={{ width: `${progress.percent}%` }}
+                        />
+                    </div>
+
+                    <div className="flex justify-between text-xs text-zinc-500">
+                        <span>{progress.message}</span>
+                        <span>{progress.percent}%</span>
+                    </div>
                 </div>
             )}
         </div>

@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 
 interface Citation {
     document_name: string;
-    page_number: number;
+    page_number: int;
     text_snippet: string;
     score: number;
     upload_date?: string;
@@ -14,257 +14,165 @@ interface Message {
     role: 'user' | 'assistant';
     content: string;
     citations?: Citation[];
-    timestamp?: string;
 }
 
 export default function ChatWindow() {
+    const { token } = useAuth();
     const [messages, setMessages] = useState<Message[]>([
-        {
-            role: 'assistant',
-            content: 'Welcome to NexusAI. I can analyze your documents and answer questions with precise citations. Upload some files to get started.',
-            citations: [],
-            timestamp: ''
-        }
+        { role: 'assistant', content: 'Hello. I am your secure offline intelligence. How can I assist you with your documents today?' }
     ]);
     const [input, setInput] = useState('');
-    const [loading, setLoading] = useState(false);
-    const scrollRef = useRef<HTMLDivElement>(null);
-    const { token } = useAuth();
+    const [isStreaming, setIsStreaming] = useState(false);
+    const bottomRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        setMessages(prev => {
-            const updated = [...prev];
-            if (updated[0] && !updated[0].timestamp) {
-                updated[0].timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            }
-            return updated;
-        });
-    }, []);
-
-    useEffect(() => {
-        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    const sendMessage = async () => {
-        if (!input.trim() || !token) return;
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!input.trim() || isStreaming) return;
 
-        const userMsg = input;
-        const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-        setMessages(prev => [...prev, { role: 'user', content: userMsg, timestamp }]);
+        const userMsg = input.trim();
         setInput('');
-        setLoading(true);
+        setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+        setIsStreaming(true);
 
         try {
-            setMessages(prev => [...prev, { role: 'assistant', content: '', citations: [], timestamp }]);
-
             const res = await fetch('http://127.0.0.1:8000/chat/stream', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ message: userMsg }),
+                body: JSON.stringify({ message: userMsg })
             });
 
-            if (!res.body) throw new Error("No body");
+            if (!res.ok) throw new Error('Failed to start stream');
 
-            const reader = res.body.getReader();
+            const reader = res.body?.getReader();
             const decoder = new TextDecoder();
-            let buffer = '';
 
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
+            // Temporary message for streaming response
+            setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
 
-                const chunk = decoder.decode(value, { stream: true });
-                buffer += chunk;
+            if (reader) {
+                let accumulatedText = "";
+                let accumulatedCitations: Citation[] = [];
 
-                const lines = buffer.split('\n\n');
-                buffer = lines.pop() || '';
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
 
-                for (const line of lines) {
-                    if (line.trim().startsWith('event: citations')) {
-                        const dataLine = line.split('\n')[1];
-                        if (dataLine && dataLine.startsWith('data: ')) {
-                            const citParams = JSON.parse(dataLine.replace('data: ', ''));
-                            setMessages(prev => {
-                                const newMsg = [...prev];
-                                newMsg[newMsg.length - 1].citations = citParams;
-                                return newMsg;
-                            });
-                        }
-                    } else if (line.trim().startsWith('data: ')) {
-                        try {
-                            const jsonStr = line.replace('data: ', '');
-                            const eventData = JSON.parse(jsonStr);
+                    const chunk = decoder.decode(value);
+                    const lines = chunk.split('\n');
 
-                            if (eventData.token) {
-                                setMessages(prev => {
-                                    const newMsg = [...prev];
-                                    const lastMsgIndex = newMsg.length - 1;
-                                    const updatedMsg = { ...newMsg[lastMsgIndex] };
-                                    updatedMsg.content += eventData.token;
-                                    newMsg[lastMsgIndex] = updatedMsg;
-                                    return newMsg;
-                                });
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const jsonStr = line.replace('data: ', '');
+                                const data = JSON.parse(jsonStr);
+
+                                if (data.token) {
+                                    accumulatedText += data.token;
+                                    setMessages(prev => {
+                                        const newMsgs = [...prev];
+                                        const last = newMsgs[newMsgs.length - 1];
+                                        if (last.role === 'assistant') {
+                                            last.content = accumulatedText;
+                                        }
+                                        return newMsgs;
+                                    });
+                                }
+                                if (data.citations) {
+                                    accumulatedCitations = data.citations;
+                                }
+                            } catch (e) {
+                                // console.error("Parse error", e);
                             }
-                        } catch (e) {
-                            console.error("Parse error", e);
                         }
                     }
                 }
-            }
-        } catch (error) {
-            setMessages(prev => {
-                const newMsg = [...prev];
-                const last = newMsg[newMsg.length - 1];
-                if (last.role === 'assistant' && !last.content) {
-                    last.content = "Connection error. Please check if the backend is running.";
+
+                // Attach citations at the end
+                if (accumulatedCitations.length > 0) {
+                    setMessages(prev => {
+                        const newMsgs = [...prev];
+                        const last = newMsgs[newMsgs.length - 1];
+                        if (last.role === 'assistant') {
+                            last.citations = accumulatedCitations;
+                        }
+                        return newMsgs;
+                    });
                 }
-                return newMsg;
-            });
+            }
+
+        } catch (error) {
+            setMessages(prev => [...prev, { role: 'assistant', content: 'Connection error. Please try again.' }]);
         } finally {
-            setLoading(false);
+            setIsStreaming(false);
         }
     };
 
     return (
-        <div className="flex flex-col h-full bg-bg-deepest">
-            {/* Header */}
-            <div className="px-6 py-5 border-b border-border-subtle flex justify-between items-center bg-bg-primary">
-                <div>
-                    <h2 className="text-lg font-semibold text-white leading-none">
-                        Intelligence Hub
-                    </h2>
-                    <p className="text-xs text-gray-500 mt-1">
-                        Ask questions about your documents
-                    </p>
-                </div>
-                <div className="flex items-center gap-2 px-3 py-1 bg-accent-emerald/10 rounded-full border border-accent-emerald/20">
-                    <span className="w-1.5 h-1.5 rounded-full bg-accent-emerald animate-pulse" />
-                    <span className="text-[11px] font-semibold text-accent-emerald">Online</span>
-                </div>
-            </div>
-
-            {/* Messages */}
-            <div
-                ref={scrollRef}
-                className="flex-1 overflow-y-auto p-6 flex flex-col gap-6 custom-scrollbar"
-            >
+        <div className="flex flex-col h-full relative">
+            {/* Messages Area */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
                 {messages.map((msg, idx) => (
-                    <div
-                        key={idx}
-                        className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                    >
-                        {/* Assistant Avatar */}
-                        {msg.role === 'assistant' && (
-                            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-accent-indigo to-accent-purple flex items-center justify-center flex-shrink-0 shadow-lg shadow-indigo-500/20">
-                                <svg className="w-4.5 h-4.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" strokeLinecap="round" strokeLinejoin="round" />
-                                </svg>
-                            </div>
-                        )}
+                    <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                        <div className={`max-w-[80%] rounded-2xl px-5 py-4 ${msg.role === 'user'
+                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/10'
+                                : 'bg-zinc-900 border border-zinc-800 text-zinc-200'
+                            }`}>
+                            <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
 
-                        {/* Message Bubble */}
-                        <div className={`max-w-[70%] ${msg.role === 'user' ? 'text-right' : ''}`}>
-                            <div className={`
-                                px-5 py-3.5 shadow-md
-                                ${msg.role === 'user'
-                                    ? 'bg-gradient-to-br from-accent-indigo to-accent-purple text-white rounded-2xl rounded-tr-sm shadow-glow-indigo'
-                                    : 'bg-bg-tertiary border border-border-subtle text-gray-200 rounded-2xl rounded-tl-none'}
-                            `}>
-                                <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
-                                    {msg.content}
-                                    {loading && msg.role === 'assistant' && idx === messages.length - 1 && !msg.content && (
-                                        <span className="inline-flex gap-1 ml-2">
-                                            <span className="w-1 h-1 rounded-full bg-accent-indigo animate-bounce" />
-                                            <span className="w-1 h-1 rounded-full bg-accent-purple animate-bounce delay-100" />
-                                            <span className="w-1 h-1 rounded-full bg-accent-cyan animate-bounce delay-200" />
-                                        </span>
-                                    )}
-                                </p>
-
-                                {/* Citations */}
-                                {msg.citations && msg.citations.length > 0 && (
-                                    <div className="mt-3 pt-3 border-t border-white/10">
-                                        <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                                            Sources
-                                        </p>
-                                        <div className="grid gap-2">
-                                            {msg.citations.map((cit, cIdx) => (
-                                                <div key={cIdx} className="p-2.5 rounded-lg bg-black/20 border border-white/5 text-left">
-                                                    <div className="flex justify-between items-center mb-1">
-                                                        <span className="text-[11px] font-medium text-accent-cyan truncate max-w-[150px]">
-                                                            {cit.document_name}
-                                                        </span>
-                                                        <div className="flex items-center gap-2">
-                                                            {cit.upload_date && (
-                                                                <span className="text-[9px] text-accent-emerald font-mono">
-                                                                    {new Date(cit.upload_date).toLocaleDateString()}
-                                                                </span>
-                                                            )}
-                                                            <span className="text-[10px] text-gray-400 font-mono">p.{cit.page_number}</span>
-                                                        </div>
-                                                    </div>
-                                                    <p className="text-[11px] text-gray-400 italic line-clamp-2">
-                                                        {cit.text_snippet}
-                                                    </p>
+                            {/* Citations */}
+                            {msg.citations && msg.citations.length > 0 && (
+                                <div className="mt-4 pt-4 border-t border-zinc-800/50">
+                                    <p className="text-[10px] uppercase font-bold text-zinc-500 mb-2">Sources</p>
+                                    <div className="flex flex-wrap gap-2">
+                                        {msg.citations.map((cit, cIdx) => (
+                                            <div key={cIdx} className="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 max-w-full">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <span className="text-xs font-semibold text-indigo-400 truncate max-w-[150px]">{cit.document_name}</span>
+                                                    <span className="text-[10px] text-zinc-600 bg-zinc-900 px-1 rounded">p. {cit.page_number}</span>
+                                                    <span className="text-[10px] text-zinc-600">{(cit.score * 100).toFixed(0)}% Match</span>
                                                 </div>
-                                            ))}
-                                        </div>
+                                                <p className="text-[10px] text-zinc-500 italic line-clamp-2">"{cit.text_snippet}"</p>
+                                            </div>
+                                        ))}
                                     </div>
-                                )}
-                            </div>
-                            <p className="text-[10px] text-gray-500 mt-1.5 opacity-70">
-                                {msg.timestamp}
-                            </p>
+                                </div>
+                            )}
                         </div>
-
-                        {/* User Avatar */}
-                        {msg.role === 'user' && (
-                            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-accent-cyan to-blue-500 flex items-center justify-center flex-shrink-0 shadow-lg shadow-cyan-500/20">
-                                <svg className="w-4.5 h-4.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                                </svg>
-                            </div>
-                        )}
                     </div>
                 ))}
+                <div ref={bottomRef} />
             </div>
 
             {/* Input Area */}
-            <div className="p-5 border-t border-border-subtle bg-bg-primary">
-                <div className="flex items-center gap-3 bg-bg-tertiary rounded-xl border border-border-default p-1.5 focus-within:border-accent-indigo focus-within:ring-1 focus-within:ring-accent-indigo/50 transition-all shadow-inner">
+            <div className="p-4 border-t border-zinc-800 bg-zinc-950/80 backdrop-blur-sm">
+                <form onSubmit={handleSubmit} className="relative max-w-4xl mx-auto">
                     <input
                         type="text"
-                        className="flex-1 bg-transparent border-none outline-none px-4 py-2.5 text-sm text-white placeholder-gray-500"
-                        placeholder="Ask a question about your documents..."
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && !loading && sendMessage()}
-                        disabled={loading}
+                        placeholder="Ask anything..."
+                        className="w-full bg-zinc-900/50 border border-zinc-800 rounded-xl pl-5 pr-12 py-4 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/50 transition-all text-sm placeholder-zinc-500 shadow-xl"
+                        disabled={isStreaming}
                     />
                     <button
-                        onClick={sendMessage}
-                        disabled={loading || !input.trim()}
-                        className={`
-                            p-2.5 rounded-lg flex items-center justify-center transition-all duration-200
-                            ${loading || !input.trim()
-                                ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                                : 'bg-gradient-to-r from-accent-indigo to-accent-purple text-white shadow-lg shadow-indigo-500/30 hover:shadow-indigo-500/50 hover:scale-105 active:scale-95'}
-                        `}
+                        type="submit"
+                        disabled={!input.trim() || isStreaming}
+                        className="absolute right-2 top-2 p-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white disabled:opacity-0 disabled:scale-90 transition-all duration-200"
                     >
-                        <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
                         </svg>
                     </button>
-                </div>
-                <p className="text-center text-[10px] text-gray-500 mt-3 font-medium flex items-center justify-center gap-1.5">
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                    </svg>
-                    Secure Enterprise Environment • Zero Data Leakage
+                </form>
+                <p className="text-center text-[10px] text-zinc-600 mt-3 font-medium">
+                    AI generated content. Check accuracy against source documents.
                 </p>
             </div>
         </div>

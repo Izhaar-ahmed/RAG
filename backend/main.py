@@ -89,6 +89,10 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
+@app.get("/users/me", response_model=User)
+async def read_users_me(current_user: User = Depends(auth.get_current_user)):
+    return current_user
+
 # --- Routes ---
 
 @app.get("/")
@@ -104,12 +108,10 @@ def health_check():
 @app.post("/upload")
 async def upload_document(
     file: UploadFile = File(...), 
-    current_user: User = Depends(auth.get_current_user)
+    current_user: User = Depends(require_admin) # CHANGED: Now requires Admin
 ):
-    # Enterprise Access Control: Check if user is allowed to upload
-    # For now, all authenticated users can upload
-    if not current_user:
-         raise HTTPException(status_code=403, detail="Authentication required")
+    # Enterprise Access Control: Enforced via require_admin dependency
+
 
     global rag_engine
     try:
