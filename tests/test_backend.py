@@ -88,10 +88,9 @@ def test_rag_search_returns_results(mock_engine):
     chunks = [{"text": f"This is chunk number {i} about machine learning", "page": 1} for i in range(5)]
     mock_engine.add_document("doc3", "ml_doc.pdf", chunks)
     
-    results, graph_context = mock_engine.search("machine learning")
+    results = mock_engine.search("machine learning")
     
     assert isinstance(results, list)
-    assert isinstance(graph_context, str)
     
     # Results should have required fields if not empty
     if results:
@@ -121,3 +120,40 @@ def test_rag_clear_resets_indexes(mock_engine):
     assert mock_engine.chunk_metadata == {}
     
     print("✅ RAG Clear Test Passed")
+
+
+def test_rag_delete_document(mock_engine):
+    """Test that delete_document removes specific doc while keeping others"""
+    # Add two documents
+    chunks1 = [{"text": "doc1 first chunk", "page": 1}, {"text": "doc1 second chunk", "page": 2}]
+    chunks2 = [{"text": "doc2 content", "page": 1}]
+    
+    mock_engine.add_document("doc1", "doc1.pdf", chunks1)
+    mock_engine.add_document("doc2", "doc2.pdf", chunks2)
+    
+    # Verify both are indexed
+    assert mock_engine.block_index.ntotal == 2
+    assert any(m["doc_id"] == "doc1" for m in mock_engine.block_metadata)
+    assert any(m["doc_id"] == "doc2" for m in mock_engine.block_metadata)
+    
+    # Delete doc1
+    result = mock_engine.delete_document("doc1")
+    
+    # Verify doc1 is gone, doc2 remains
+    assert result["status"] == "success"
+    assert not any(m["doc_id"] == "doc1" for m in mock_engine.block_metadata)
+    assert any(m["doc_id"] == "doc2" for m in mock_engine.block_metadata)
+    assert mock_engine.block_index.ntotal == 1
+    
+    print("✅ RAG Delete Document Test Passed")
+
+
+def test_rag_delete_nonexistent_document(mock_engine):
+    """Test that deleting a non-existent document returns error"""
+    result = mock_engine.delete_document("nonexistent_doc")
+    
+    assert result["status"] == "error"
+    assert "not found" in result["message"]
+    
+    print("✅ RAG Delete Non-existent Document Test Passed")
+

@@ -1,14 +1,14 @@
 import os
+import json
 import faiss
 import numpy as np
 import threading
-import concurrent.futures
 import logging
+from datetime import datetime
 from typing import List, Optional, Dict
 from sentence_transformers import SentenceTransformer
 from llama_cpp import Llama
 from backend.models import Citation
-from backend.graph_engine import LocalGraphStore, BlockGraphBuilder
 
 class RAGEngine:
     def __init__(self, models_dir: str = "models"):
@@ -34,17 +34,31 @@ class RAGEngine:
         # Paths
         self.block_index_path = os.path.join(models_dir, "block_index.bin")
         self.metadata_path = os.path.join(models_dir, "block_metadata.npy")
-        self.graph_path = os.path.join(models_dir, "knowledge_graph.json")
+        self.status_path = os.path.join(models_dir, "processing_status.json")
         
-        self.lock = threading.Lock() # Lock for thread-safe writes because FAISS/Graph are not thread-safe for writes
+        self.lock = threading.Lock() # Lock for thread-safe writes
         
         os.makedirs(self.indexes_dir, exist_ok=True)
         
         self.load_models()
         
-        # Initialize Graph Engine
-        self.graph_store = LocalGraphStore(self.graph_path)
-        self.graph_builder = BlockGraphBuilder(self.llm)
+        # Initialize status as ready
+        self.update_status("ready", "System ready", 100)
+
+    def update_status(self, stage: str, message: str, progress: int):
+        """
+        Write processing status for frontend polling.
+        
+        Args:
+            stage: "uploading", "chunking", "indexing", "ready", "error"
+            message: Human-readable status message
+            progress: 0-100 percentage
+        """
+        try:
+            with open(self.status_path, "w") as f:
+                json.dump({"status": stage, "message": message, "progress": progress}, f)
+        except Exception as e:
+            print(f"Error writing status: {e}")
 
     def load_models(self):
         print("Loading Embedding Model...")
@@ -72,12 +86,11 @@ class RAGEngine:
                 
             if model_file:
                 model_path = os.path.join(self.models_dir, model_file)
-                # OPTIMIZATION: Reduce n_threads since we use concurrent workers for graph
                 self.llm = Llama(
                     model_path=model_path, 
                     n_ctx=4096,
-                    n_gpu_layers=-1, 
-                    n_threads=2, # Reduced from 6 to avoid CPU thrashing with 4 workers
+                    n_gpu_layers=-1, # GPU ENABLED for speed
+                    n_threads=2, 
                     verbose=False     
                 )
             else:
@@ -127,10 +140,7 @@ class RAGEngine:
             faiss.write_index(index, index_path)
             np.save(meta_path, self.chunk_metadata[block_id])
             
-        # Save Graph
-        self.graph_store.save()
-            
-        print("Indexes and Graph saved.")
+        print("Indexes saved.")
 
     def clear(self):
         """Clears all indexes and metadata from memory and disk."""
@@ -139,7 +149,6 @@ class RAGEngine:
         self.block_metadata = []
         self.chunk_indexes = {}
         self.chunk_metadata = {}
-        self.graph_store.graph.clear() # Clear networkx graph
         
         # Delete files
         import shutil
@@ -151,14 +160,90 @@ class RAGEngine:
             os.remove(self.block_index_path)
         if os.path.exists(self.metadata_path):
             os.remove(self.metadata_path)
-        if os.path.exists(self.graph_path):
-            os.remove(self.graph_path)
             
         print("System Reset Complete.")
+
+    def delete_document(self, doc_id: str) -> dict:
+        """
+        Delete a single document from all indexes and storage.
+        
+        This performs a full cleanup:
+        1. FAISS: Rebuild indexes without the deleted doc's blocks
+        2. Disk: Delete chunk index files and uploaded file
+        
+        Returns:
+            dict with status and message
+        """
+        print(f"Deleting document: {doc_id}")
+        
+        # Find all blocks belonging to this document
+        blocks_to_delete = [m["block_id"] for m in self.block_metadata if m["doc_id"] == doc_id]
+        
+        if not blocks_to_delete:
+            return {"status": "error", "message": f"Document {doc_id} not found"}
+        
+        # Get doc name for file deletion
+        doc_name = None
+        for m in self.block_metadata:
+            if m["doc_id"] == doc_id:
+                doc_name = m.get("name")
+                break
+        
+        # --- FAISS Index Rebuild ---
+        print("  Rebuilding FAISS indexes...")
+        
+        # Filter metadata to keep only non-deleted docs
+        remaining_metadata = [m for m in self.block_metadata if m["doc_id"] != doc_id]
+        
+        # Delete old chunk index files for deleted blocks
+        for block_id in blocks_to_delete:
+            index_path = os.path.join(self.indexes_dir, f"{block_id}.bin")
+            meta_path = os.path.join(self.indexes_dir, f"{block_id}_meta.npy")
+            
+            if os.path.exists(index_path):
+                os.remove(index_path)
+            if os.path.exists(meta_path):
+                os.remove(meta_path)
+                
+            # Remove from memory
+            if block_id in self.chunk_indexes:
+                del self.chunk_indexes[block_id]
+            if block_id in self.chunk_metadata:
+                del self.chunk_metadata[block_id]
+        
+        # Rebuild block index from remaining blocks
+        new_block_index = faiss.IndexFlatL2(self.dimension)
+        
+        for meta in remaining_metadata:
+            block_id = meta["block_id"]
+            if block_id in self.chunk_metadata:
+                # Re-compute block embedding from chunks
+                chunk_texts = [c["text"] for c in self.chunk_metadata[block_id]]
+                chunk_embeddings = self.embedding_model.encode(chunk_texts)
+                block_embedding = np.mean(chunk_embeddings, axis=0).reshape(1, -1)
+                new_block_index.add(np.array(block_embedding).astype('float32'))
+        
+        self.block_index = new_block_index
+        self.block_metadata = remaining_metadata
+        
+        # --- Step 3: File Deletion ---
+        if doc_name:
+            file_path = os.path.join("uploads", doc_name)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"  Deleted file: {file_path}")
+        
+        # Save changes
+        self.save_index()
+        
+        return {"status": "success", "message": f"Document '{doc_name}' deleted successfully"}
 
     def add_document(self, doc_id: str, doc_name: str, chunks: List[dict]):
         if not chunks:
             return
+        
+        # Generate timestamp for all chunks in this document
+        created_at = datetime.now().isoformat()
             
         # 1. GROUP CHUNKS INTO 20-PAGE BLOCKS
         # Sort chunks first by page
@@ -173,6 +258,14 @@ class RAGEngine:
         
         for chunk in chunks:
             page = chunk.get("page", 1)
+            
+            # VERSION CONTROL: Use file modification time if available, else current time
+            # This ensures we respect the actual version of the file
+            if "metadata" in chunk and "last_modified" in chunk["metadata"]:
+                chunk["created_at"] = chunk["metadata"]["last_modified"]
+            else:
+                chunk["created_at"] = created_at
+            
             # page 1..20 -> block 0
             # page 21..40 -> block 1
             block_idx = (page - 1) // BLOCK_SIZE_PAGES
@@ -182,7 +275,6 @@ class RAGEngine:
             blocks[block_idx].append(chunk)
 
         # 2. PROCESS EACH BLOCK (FAISS ONLY - FAST)
-        block_items = []
         for b_idx, block_chunks in blocks.items():
             block_id = f"{doc_id}_block_{b_idx}"
             start_page = (b_idx * BLOCK_SIZE_PAGES) + 1
@@ -207,96 +299,122 @@ class RAGEngine:
                 "doc_id": doc_id,
                 "name": doc_name,
                 "page_range": f"{start_page}-{end_page}",
-                "chunk_count": len(block_chunks)
+                "chunk_count": len(block_chunks),
+                "created_at": created_at  # Timestamp for freshness ranking
             })
             
             print(f"Index: Added Block {b_idx} for {doc_name}")
-            
-            # Prepare for Background Graph Building
-            block_items.append({
-                "b_idx": b_idx,
-                "block_chunks": block_chunks,
-                "doc_id": doc_id,
-                "doc_name": doc_name,
-                "block_id": block_id,
-                "page_range": f"{start_page}-{end_page}"
-            })
 
-        self.save_index() # Save FAISS index immediately
-        
-        # 3. TRIGGER BACKGROUND GRAPH BUILDING
-        # Fire and forget (or rather, run in background thread pool)
-        threading.Thread(target=self._build_graph_background, args=(block_items,), daemon=True).start()
-        print("Background: Started Graph Building task...")
-        
-    def _build_graph_background(self, block_items: List[dict]):
-        """Runs graph extraction in background without blocking upload"""
-        print(f"Graph Background: Processing {len(block_items)} blocks...")
-        
-        # We can still use ThreadPool for concurrency within the background task
-        # But limited workers to avoid lagging the UI query
-        max_workers = 2 
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self._process_graph_for_block, item) for item in block_items]
-            concurrent.futures.wait(futures)
-            
-        self.save_index() # Save graph
-        print("Graph Background: Completed and Saved.")
+        self.save_index()
+        self.update_status("ready", "Document indexed. System ready.", 100)
+        print(f"Document '{doc_name}' indexed successfully.")
 
-    def _process_graph_for_block(self, item: dict):
-        """Worker for specific graph extraction logic"""
-        if not self.llm:
-            return
-
-        block_id = item["block_id"]
-        block_chunks = item["block_chunks"]
-        doc_id = item["doc_id"]
+    def rerank_by_freshness(self, results: list, top_k: int = 5) -> list:
+        """
+        Re-rank results by document freshness (newest first).
         
-        current_thread = threading.current_thread().name
-        chunk_texts = [c["text"] for c in block_chunks]
-        block_text = "\n".join(chunk_texts)
+        This ensures that if two chunks are similar in meaning, 
+        the one from the more recently uploaded document appears first.
         
-        try:
-            # Note: locking LLM is safer if instance is shared
-            with self.lock: 
-                 triplets = self.graph_builder.process_block(block_id, block_text)
+        Args:
+            results: List of chunk dictionaries with 'created_at' field
+            top_k: Maximum number of results to return
             
-            with self.lock:
-                self.graph_store.add_block_node(block_id, metadata={"doc_id": doc_id, "page_range": item["page_range"]})
-                for head, rel, tail in triplets:
-                    self.graph_store.add_entity_node(head)
-                    self.graph_store.add_entity_node(tail)
-                    self.graph_store.add_relationship(head, tail, rel)
-                    self.graph_store.add_relationship(block_id, head, "contains")
-                    self.graph_store.add_relationship(block_id, tail, "contains")
-            
-            print(f"[{current_thread}] Graph: Processed {block_id}")
-            
-        except Exception as e:
-            print(f"[{current_thread}] Graph Error {block_id}: {e}")
+        Returns:
+            Top k results sorted by created_at (descending)
+        """
+        sorted_results = sorted(
+            results, 
+            key=lambda x: x.get("created_at", "1970-01-01"), 
+            reverse=True  # Newest first
+        )
+        return sorted_results[:top_k]
 
-    def search(self, query: str, top_k_blocks: int = 3, top_k_chunks: int = 5, score_threshold: float = 1.35):
+    def search(self, query: str, top_k_blocks: int = 15, top_k_chunks: int = 5, score_threshold: float = 1.35):
+        import re
+        target_doc = None
+        # Use word boundary \b to avoid matching "explain" -> "in"
+        # greedy match for filename: capture until the last .pdf/.docx/.txt
+        match = re.search(r'\b(?:in|from)\s+([a-zA-Z0-9_\-\.\s]+\.(?:pdf|docx|txt))', query, re.IGNORECASE)
+        if match:
+            target_doc = match.group(1).strip()
+            print(f"Targeted Search: '{target_doc}'")
+
         query_vector = self.embedding_model.encode([query]).astype('float32')
         
         # STAGE 1: Block Search
         if self.block_index.ntotal == 0:
             return [], ""
             
-        k_blocks = min(top_k_blocks, self.block_index.ntotal)
-        block_dists, block_indices = self.block_index.search(query_vector, k_blocks)
-        
+        if self.block_index.ntotal == 0:
+            return [], ""
+            
         relevant_block_ids = []
-        for i, idx in enumerate(block_indices[0]):
-            if idx != -1 and idx < len(self.block_metadata):
-                relevant_block_ids.append(self.block_metadata[idx]["block_id"])
         
-        # STAGE 2: Graph Enrichment
-        graph_context = self.graph_store.get_contextual_subgraph(relevant_block_ids)
-        if graph_context:
-            print(f"Graph Enrichment:\n{graph_context}")
+        # --- PATH A: Deterministic Targeted Search ---
+        if target_doc:
+            # If user specifies a doc, we MUST search only that doc.
+            # Standard FAISS search might miss it if other docs dominate the top K.
+            # So we scan metadata, find matching blocks, and compute scores manually.
+            print(f"Executing deterministic search within: {target_doc}")
+            
+            candidates = []
+            
+            for idx, meta in enumerate(self.block_metadata):
+                # Check name (handle both keys)
+                doc_name = meta.get("name") or meta.get("document_name")
                 
-        # STAGE 3: Chunk Search within relevant BLOCKS
+                # Case-insensitive comparison for user friendliness
+                if doc_name and doc_name.lower() == target_doc.lower():
+                    # Reconstruct vector from FAISS (IndexFlatL2 supports this)
+                    if idx < self.block_index.ntotal:
+                        vec = self.block_index.reconstruct(idx)
+                        # Compute L2 distance manually: sum((v1-v2)^2)
+                        # query_vector is (1, dim), vec is (dim,)
+                        dist = np.sum((vec - query_vector[0])**2)
+                        
+                        candidates.append({
+                            "idx": idx,
+                            "dist": dist,
+                            "block": meta
+                        })
+            
+            # Sort by distance (asc)
+            candidates.sort(key=lambda x: x["dist"])
+            
+            # Take top K
+            for c in candidates[:top_k_blocks]:
+                relevant_block_ids.append(c["block"]["block_id"])
+                
+        # --- PATH B: Standard Semantic Search ---
+        else:
+            k_blocks = min(top_k_blocks, self.block_index.ntotal)
+            block_dists, block_indices = self.block_index.search(query_vector, k_blocks)
+            
+            candidates_all = []
+            for i, idx in enumerate(block_indices[0]):
+                if i >= len(block_dists[0]): break
+                dist = block_dists[0][i]
+                
+                if idx != -1 and idx < len(self.block_metadata):
+                    # add to candidates first, judge later
+                    candidates_all.append({
+                        "id": self.block_metadata[idx]["block_id"],
+                        "score": dist
+                    })
+
+            # Filter with threshold
+            good_candidates = [c for c in candidates_all if c["score"] <= score_threshold]
+            
+            # Fallback Strategy: If no "good" candidates, take the top 3 best-effort ones
+            # This prevents "Information not available" when the answer exists but has a weak score
+            if not good_candidates and candidates_all:
+                print(f"Warning: Low retrieval scores (Best: {candidates_all[0]['score']:.2f}). Using fallback.")
+                relevant_block_ids = [c["id"] for c in candidates_all[:top_k_blocks]]
+            else:
+                 relevant_block_ids = [c["id"] for c in good_candidates[:top_k_blocks]]
+                
+        # STAGE 2: Chunk Search within relevant BLOCKS
         all_candidates = []
         
         for block_id in relevant_block_ids:
@@ -311,17 +429,16 @@ class RAGEngine:
                     if match_idx != -1 and match_idx < len(meta):
                         distance = float(dists[0][j])
                         
-                        # STRICT THRESHOLD CHECK
-                        # L2 Distance 1.35 approx equates to Cosine Sim ~0.32
-                        if distance > score_threshold:
-                            continue
+                        # No threshold filtering at chunk level - trust block selection
+                        # The Adaptive Filtering at the end handles relevance trimming
                             
                         item = meta[match_idx]
                         all_candidates.append({
                             "text": item["text"],
                             "page": item.get("page", 1),
                             "score": distance,
-                            "document_name": item.get("source", "unknown")
+                            "document_name": item.get("source", "unknown"),
+                            "created_at": item.get("created_at", "1970-01-01")  # For freshness ranking
                         })
         
         # Sort by score (L2 distance ascending) and take top K global
@@ -330,24 +447,44 @@ class RAGEngine:
         # Adaptive Filtering: Limit citations to those close to the best match
         # Helps avoid providing 5 citations when only 1 is relevant
         final_results = []
-        if all_candidates:
-            best_score = all_candidates[0]["score"]
-            # Allow a small margin (e.g. 10-15% worse than best is okay)
-            # Since L2 score: Lower is better. 
-            # If best is 0.5, allow up to 0.55. If best is 1.0, allow 1.1.
+        
+        # KEYWORD BOOST: Force-include chunks that contain query words exactly
+        # This helps with structured data like tables where semantic search fails
+        query_words = [w.lower() for w in query.split() if len(w) > 2]
+        keyword_matches = []
+        other_candidates = []
+        
+        for c in all_candidates:
+            text_lower = c["text"].lower()
+            # If most query words appear in the chunk, it's a keyword match
+            matches = sum(1 for w in query_words if w in text_lower)
+            if matches >= len(query_words) * 0.6:  # 60% of words match
+                keyword_matches.append(c)
+            else:
+                other_candidates.append(c)
+        
+        # Always include keyword matches first
+        final_results.extend(keyword_matches)
+        
+        # Then add semantic matches with Adaptive Filtering
+        if other_candidates:
+            best_score = other_candidates[0]["score"]
             score_margin = 1.1 
             
-            for c in all_candidates:
+            for c in other_candidates:
                 if c["score"] <= best_score * score_margin:
                     final_results.append(c)
                 else:
-                    break # Since sorted, we can stop early
+                    break
         
-        return final_results[:top_k_chunks], graph_context
+        # STAGE 3: Freshness Re-ranking (newest documents first)
+        final_results = self.rerank_by_freshness(final_results, top_k_chunks)
+        
+        return final_results
 
     def generate_answer(self, query: str) -> dict:
-        # Retrieve with threshold
-        context_items, graph_context = self.search(query)
+        # Retrieve with freshness-ranked results - Top 10 to capture history
+        context_items = self.search(query, top_k_chunks=10)
         
         if not context_items:
             print(f"Refusal: No context items passed threshold for query '{query}'")
@@ -356,35 +493,52 @@ class RAGEngine:
                 "citations": []
             }
 
-        # Build Context
-        context_str = "\n\n".join([f"Document: {c['document_name']} (Page {c['page']})\nContent: {c['text']}" for c in context_items])
+        # Build Context with upload dates for freshness awareness
+        context_str = "\n\n".join([
+            f"Document: {c['document_name']} (Page {c['page']}, Uploaded: {c.get('created_at', 'unknown')[:10]})\nContent: {c['text']}" 
+            for c in context_items
+        ])
         
-        if graph_context:
-            context_str += f"\n\n[Keep in mind the following Knowledge Graph connections]:\n{graph_context}"
-        
-        # ChatML Formatting for Phi-3
+        # System prompt with TEMPORAL RESOLUTION instruction
         system_instruction = """You are a precise and honest assistant. Your task is to answer the user's question using ONLY the provided context.
 Instructions:
 1. The User Question may contain typos. Match distinct words in the context (e.g. "Marigin" matches "Margin").
 2. Answer the question using ONLY the provided context.
 3. If the context does not contain the answer, output the exact phrase: "The requested information is not available in the uploaded documents."
-4. CRITICAL: Do NOT use outside knowledge. Do NOT explain concepts (like "Softmax") not found in the context."""
+4. CRITICAL: Do NOT use outside knowledge. Do NOT explain concepts (like "Softmax") not found in the context.
+5. TEMPORAL RESOLUTION:
+   - If the user asks for the CURRENT state (e.g., "Who is X?"), prioritize the document with the LATEST upload date.
+   - If the user asks for HISTORY (e.g., "Who was X before?", "How has X changed?"), use ALL documents to construct a timeline.
+   - Explicitly mention dates when information changed (e.g., "According to the 2024 report, X was Y, but the 2026 report states X is Z")."""
 
-        user_content = f"Context:\n{context_str}\n\nUser Question: {query}"
-        
-        prompt = f"<|user|>\n{system_instruction}\n\n{user_content}<|end|>\n<|assistant|>"
+        # BASIC PROMPT
+        prompt = (
+            f"{system_instruction}\n\n"
+            f"Context:\n{context_str}\n\n"
+            f"Question: {query}\n\n"
+            f"Answer:"
+        )
 
         answer = ""
         if self.llm:
-            output = self.llm(
-                prompt, 
-                max_tokens=512, 
-                stop=["User Question:", "\n\n"], 
-                echo=False
-            )
-            answer = output['choices'][0]['text'].strip()
+            try:
+                # Strict sampling params to prevent gibberish
+                output = self.llm(
+                    prompt, 
+                    max_tokens=256,        # Reduced for speed
+                    temperature=0.1,       # Very deterministic
+                    top_p=0.9,             # Nucleus sampling
+                    repeat_penalty=1.1,    # Prevent repetition/garbage loops
+                    stop=["Question:", "\n\nUser", "\n\n\n"],
+                    echo=False
+                )
+                answer = output['choices'][0]['text'].strip()
+            except Exception as e:
+                print(f"LLM Error: {e}")
+                answer = "Error generating response."
         else:
             answer = "⚠️ **System Notice**: LLM not loaded. Displaying retrieved context only."
+
 
         # Double check model refusal
         if "information is not available" in answer.lower() or "context does not contain" in answer.lower():
@@ -398,7 +552,8 @@ Instructions:
                 document_name=c['document_name'],
                 page_number=c['page'],
                 text_snippet=c['text'][:150] + "...",
-                score=c['score']
+                score=c['score'],
+                upload_date=c.get('created_at', None)
             ) for c in context_items
         ]
 
@@ -408,99 +563,113 @@ Instructions:
         }
 
     def generate_answer_stream(self, query: str):
-        # Retrieve
-        context_items, graph_context = self.search(query, top_k_chunks=3)
+        # Retrieve with freshness-ranked results - Top 10 to capture history
+        context_items = self.search(query, top_k_chunks=10)
         
         # 1. Handle No Context (Refusal)
         if not context_items:
             yield "data: " + str({"answer": "The requested information is not available in the uploaded documents.", "citations": []}).replace("'", '"') + "\n\n"
             return
 
-        # 2. Prepare Prompt
-        context_str = "\n\n".join([f"Document: {c['document_name']} (Page {c['page']})\nContent: {c['text']}" for c in context_items])
+        # 2. Prepare Prompt with freshness awareness
+        context_str = "\n\n".join([
+            f"Document: {c['document_name']} (Page {c['page']}, Uploaded: {c.get('created_at', 'unknown')[:10]})\nContent: {c['text']}" 
+            for c in context_items
+        ])
         
-        if graph_context:
-            context_str += f"\n\n[Keep in mind the following Knowledge Graph connections]:\n{graph_context}"
-        
-        # ChatML Formatting for Phi-3
+        # System prompt with TEMPORAL RESOLUTION instruction
         system_instruction = """You are a precise and honest assistant. Your task is to answer the user's question using ONLY the provided context.
 Instructions:
 1. The User Question may contain typos. Match distinct words in the context (e.g. "Marigin" matches "Margin").
 2. Answer the question using ONLY the provided context.
 3. If the context does not contain the answer, output the exact phrase: "The requested information is not available in the uploaded documents."
-4. CRITICAL: Do NOT use outside knowledge. Do NOT explain concepts (like "Softmax") not found in the context."""
+4. CRITICAL: Do NOT use outside knowledge. Do NOT explain concepts (like "Softmax") not found in the context.
+5. TEMPORAL RESOLUTION:
+   - If the user asks for the CURRENT state (e.g., "Who is X?"), prioritize the document with the LATEST upload date.
+   - If the user asks for HISTORY (e.g., "Who was X before?", "How has X changed?"), use ALL documents to construct a timeline.
+   - Explicitly mention dates when information changed (e.g., "According to the 2024 report, X was Y, but the 2026 report states X is Z")."""
 
-        user_content = f"Context:\n{context_str}\n\nUser Question: {query}"
-        
-        prompt = f"<|user|>\n{system_instruction}\n\n{user_content}<|end|>\n<|assistant|>"
+        prompt = (
+            f"{system_instruction}\n\n"
+            f"Context:\n{context_str}\n\n"
+            f"Question: {query}\n\n"
+            f"Answer:"
+        )
 
         import json
         
         # 3. Stream Tokens with Buffering
         if self.llm:
-            stream = self.llm(
-                prompt,
-                max_tokens=512,
-                stop=["User Question:", "\n\n"],
-                stream=True,
-                echo=False
-            )
-            
-            # Buffer only first 30 chars to detect refusal (smaller for smoother streaming)
-            buffer = ""
-            citations_sent = False
-            
-            citations_payload = [
-                {
-                    "document_name": c['document_name'],
-                    "page_number": c['page'],
-                    "text_snippet": c['text'][:150] + "...",
-                    "score": float(c['score'])
-                } for c in context_items
-            ]
-            
-            for output in stream:
-                token = output['choices'][0]['text']
+            with self.lock:
+                stream = self.llm(
+                    prompt,
+                    max_tokens=256,
+                    temperature=0.1,
+                    top_p=0.9,
+                    repeat_penalty=1.1,
+                    stop=["Question:", "\n\n\n"],
+                    stream=True,
+                    echo=False
+                )
                 
-                if not citations_sent:
-                    buffer += token
-                    # Smaller buffer (30 chars) for faster initial response
-                    if len(buffer) > 30: 
-                        # Check for refusal
-                        refusal_phrases = ["information is not available", "context does not contain", "not available"]
-                        is_refusal = any(phrase in buffer.lower() for phrase in refusal_phrases)
-                        
-                        if is_refusal:
-                            yield f"event: citations\ndata: {json.dumps([])}\n\n"
-                        else:
-                            yield f"event: citations\ndata: {json.dumps(citations_payload)}\n\n"
+                # Buffer to detect refusal
+                buffer = ""
+                citations_sent = False
+                
+                citations_payload = [
+                    {
+                        "document_name": c['document_name'],
+                        "page_number": c['page'],
+                        "text_snippet": c['text'][:150] + "...",
+                        "score": float(c['score']),
+                        "upload_date": c.get('created_at', None)
+                    } for c in context_items
+                ]
+                
+                for output in stream:
+                    token = output['choices'][0]['text']
+                    
+                    if not citations_sent:
+                        buffer += token
+                        # Buffer ~50 chars (compromise between speed and refusal detection)
+                        if len(buffer) > 50: 
+                            # Check for refusal
+                            refusal_phrases = [
+                                "information is not available", 
+                                "not available in the uploaded documents",
+                                "context does not contain"
+                            ]
+                            is_refusal = any(phrase in buffer.lower() for phrase in refusal_phrases)
                             
-                        citations_sent = True
-                        
-                        # Stream buffer WORD BY WORD for smoother typewriter effect
-                        words = buffer.split(' ')
-                        for i, word in enumerate(words):
-                            # Add space back except for first word
-                            word_with_space = word if i == 0 else ' ' + word
-                            yield f"data: {json.dumps({'token': word_with_space})}\n\n"
-                        buffer = ""
-                        
-                else:
-                    # Stream tokens immediately for real-time feel
-                    yield f"data: {json.dumps({'token': token})}\n\n"
-            
-            # Flush remaining buffer if loop ends and we never sent citations (short answer)
-            if not citations_sent:
-                # Check for refusal in short answer
-                refusal_phrases = ["information is not available", "context does not contain"]
-                is_refusal = any(phrase in buffer.lower() for phrase in refusal_phrases)
+                            if is_refusal:
+                                yield f"event: citations\ndata: {json.dumps([])}\n\n"
+                            else:
+                                yield f"event: citations\ndata: {json.dumps(citations_payload)}\n\n"
+                                
+                            citations_sent = True
+                            
+                            # Stream buffer WORD BY WORD for smoother typewriter effect
+                            words = buffer.split(' ')
+                            for i, word in enumerate(words):
+                                word_with_space = word if i == 0 else ' ' + word
+                                yield f"data: {json.dumps({'token': word_with_space})}\n\n"
+                            buffer = ""
+                            
+                    else:
+                        # Stream tokens immediately for real-time feel
+                        yield f"data: {json.dumps({'token': token})}\n\n"
                 
-                if is_refusal:
-                     yield f"event: citations\ndata: {json.dumps([])}\n\n"
-                else:
-                     yield f"event: citations\ndata: {json.dumps(citations_payload)}\n\n"
-                
-                yield f"data: {json.dumps({'token': buffer})}\n\n"
+                # Flush remaining buffer if loop ends and we never sent citations
+                if not citations_sent:
+                    refusal_phrases = ["information is not available", "not available in the uploaded documents", "context does not contain"]
+                    is_refusal = any(phrase in buffer.lower() for phrase in refusal_phrases)
+                    
+                    if is_refusal:
+                         yield f"event: citations\ndata: {json.dumps([])}\n\n"
+                    else:
+                         yield f"event: citations\ndata: {json.dumps(citations_payload)}\n\n"
+                    
+                    yield f"data: {json.dumps({'token': buffer})}\n\n"
 
         else:
             yield f"data: {json.dumps({'token': '⚠️ LLM not loaded.'})}\n\n"

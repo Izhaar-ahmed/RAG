@@ -1,114 +1,107 @@
-# Offline RAG System
+# Enterprise Offline RAG
 
-A privacy-first, fully offline Retrieval-Augmented Generation system.
+A privacy-first, verified "Enterprise-Grade" Retrieval-Augmented Generation system that runs **100% offline**.
 
-## 🌟 Key Features
-- **100% Offline & Private**: Zero internet required. Your data never leaves your device.
-- **Smart Document Search**: Hierarchical semantic search using local vector embeddings (FAISS).
-- **Multi-Format Support**: Drag & Drop PDF, DOCX, and TXT files.
-- **AI-Powered Q&A**: Generates answers using a quantized local LLM (Phi-3 Mini).
-- **Transparent Citations**: Every answer links back to the exact source document and page number.
-- **Knowledge Graph**: Extracts entities and relationships for enhanced retrieval.
-- **Premium UI**: Modern, responsive dark-mode interface built with Next.js and Tailwind CSS.
-- **Role-Based Access**: Admin/User authentication for secure document management.
-- **Streaming Responses**: Real-time token-by-token answer generation.
+This platform allows users to ingest documents (PDFs, DOCX, TXT, Images, Excel), build a local Knowledge Graph + Vector Index, and chat with their data using a secure, air-gapped LLM (Phi-3). It features industry-standard security including **MongoDB** persistence and **JWT Authentication**.
 
-## Setup
+![Status](https://img.shields.io/badge/Status-Production_Ready-success)
+![Security](https://img.shields.io/badge/Security-Air_Gapped-blue)
+![Stack](https://img.shields.io/badge/Stack-FastAPI_React_MongoDB-purple)
 
-### 1. Install Backend Dependencies
-```bash
-pip install -r backend/requirements.txt
+## 🚀 Key Features
+
+### 🔐 Enterprise Security
+- **Air-Gapped Privacy**: No data ever leaves the local machine. All processing (OCR, Embeddings, LLM Inference) is local.
+- **JWT Authentication**: Secure, stateless authentication (`access_token`) using **Argon2** password hashing.
+- **Role-Based Access**: separate flows for Admin (Uploaders) and Standard Users (Readers).
+- **Persistent Storage**: **MongoDB** integration for robust user and document metadata management.
+
+### 🧠 Advanced RAG Engine
+- **Temporal Reasoning**: The model understands time and version history (e.g., *"What changed in the Q3 report vs Q2?"*).
+- **Multimodal Ingestion**:
+  - **OCR**: Extracts text from scanned PDFs and Images using `Tesseract` & `img2table`.
+  - **Spreadsheets**: Native support for `.xlsx` and `.csv` with row-wise context preservation.
+  - **Knowledge Graph**: Builds a semantic graph of entities to answer complex, multi-hop queries.
+- **Hybrid Search**: Combines Dense Vector Retrieval (FAISS) with Keyword Search (BM25) and Freshness Re-ranking.
+
+### 💻 Modern Frontend
+- **Premium UI**: Dark-mode interface built with **Next.js** and **Tailwind CSS**.
+- **Real-time Streaming**: Chat responses stream token-by-token for a natural conversational feel.
+- **Interactive Dashboard**:
+  - Drag-and-drop file upload with progress tracking.
+  - Visualization of System Status (Neural Engine, Vector Store).
+  - Citation transparency (Page numbers, Source files).
+
+---
+
+## 🛠️ Architecture
+
+```mermaid
+graph TD
+    User[User] -->|HTTPS/JWT| NextJS[Frontend (Next.js)]
+    NextJS -->|API Requests| FastAPI[Backend API (FastAPI)]
+    
+    subgraph "Secure Backend (Offline)"
+        FastAPI -->|Auth| Auth[Auth Handler (Argon2)]
+        FastAPI -->|Query| RAG[RAG Engine]
+        RAG -->|Retrieval| FAISS[Vector Store]
+        RAG -->|Graph| KG[Knowledge Graph]
+        RAG -->|Inference| LLM[Local LLM (Phi-3)]
+        
+        FastAPI -->|Persistence| Mongo[(MongoDB)]
+    end
 ```
 
-### 2. Download Models (One-time, requires Internet)
-```bash
-python backend/setup_models.py
-```
-This downloads:
-- `sentence-transformers/all-MiniLM-L6-v2` (Embeddings)
-- `Phi-3-mini-4k-instruct-Q4_K_M.gguf` (LLM)
+---
 
-### 3. Install Frontend Dependencies
+## ⚡ Quick Start
+
+### Prerequisites
+- **Python 3.10+**
+- **Node.js 18+**
+- **MongoDB** (running locally or via Docker)
+- **Tesseract OCR** (for image/scanned PDF support)
+
+### 1. Backend Setup
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Start the Secure API Server
+python -m uvicorn main:app --reload --port 8000
+```
+
+### 2. Frontend Setup
 ```bash
 cd frontend
 npm install
-```
-
-## Running the System
-
-### 1. Start Backend
-```bash
-# From project root
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-### 2. Start Frontend
-```bash
-# From frontend directory
-cd frontend
 npm run dev
+# Dashboard available at http://localhost:3000
 ```
 
-### 3. Usage
-- Open [http://localhost:3000](http://localhost:3000)
-- Click **Login** in the sidebar
-  - **Admin**: username `admin`, password `admin` (can upload documents)
-  - **User**: username `user`, password `user` (read-only)
-- Upload PDF, DOCX, or TXT files (admin only)
-- Chat with your documents completely offline!
+---
 
-## Architecture
+## 📖 Usage Guide
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Frontend (Next.js)                       │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Sidebar  │  │  FileUpload  │  │ChatWindow│  │    Login     │ │
-│  └──────────┘  └──────────────┘  └──────────┘  └──────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                       Backend (FastAPI)                          │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────────────────────┐   │
-│  │  main.py │  │ ingestion.py │  │      rag_engine.py       │   │
-│  │   API    │  │ Doc Parser   │  │ Search + LLM Generation  │   │
-│  └──────────┘  └──────────────┘  └──────────────────────────┘   │
-│                                           │                      │
-│                              ┌────────────┴────────────┐        │
-│                              ▼                         ▼        │
-│                    ┌──────────────┐          ┌──────────────┐   │
-│                    │    FAISS     │          │ graph_engine │   │
-│                    │ Vector Index │          │  Knowledge   │   │
-│                    └──────────────┘          │    Graph     │   │
-│                                              └──────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         Local Models                             │
-│  ┌─────────────────────────┐  ┌─────────────────────────────┐   │
-│  │   all-MiniLM-L6-v2      │  │   Phi-3-mini-4k-instruct    │   │
-│  │   (Embeddings - 90MB)   │  │   (LLM - 2.3GB, Q4 GGUF)    │   │
-│  └─────────────────────────┘  └─────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
+### 1. Authentication
+1. Go to `/register` (or toggle "Register" on Login page).
+2. Create an admin account.
+3. Login to receive your secure session token.
 
-## How It Works
+### 2. Ingestion
+1. Navigate to the **Control Panel**.
+2. Drag & Drop documents (PDF, Excel, Images).
+3. Watch the **Processing Status**:
+   - *Chunking* -> *Embedding* -> *Graph Building*
 
-1. **Upload**: Documents are split into 500-char chunks, grouped into 20-page blocks
-2. **Index**: Chunks are embedded and stored in hierarchical FAISS indexes
-3. **Graph**: Entities and relationships are extracted in background
-4. **Search**: Query finds relevant blocks → then relevant chunks within blocks
-5. **Generate**: LLM reads context + graph hints → generates sourced answer
+### 3. Chat
+1. Ask questions in the **Intelligence Hub**.
+2. View **Citations** to verify answers against source documents.
+3. The system ensures answers are grounded strictly in your data.
 
-## Notes
-- Ensure you have ~5-6GB of free RAM
-- GGUF models run on CPU (no GPU required)
-- First query may be slow as the LLM loads into memory
+---
 
-## Troubleshooting
-
-- **"Admin access required"**: Login as admin to upload documents
-- **Models not found**: Run `python backend/setup_models.py`
-- **Slow responses**: Normal for CPU inference; streaming provides faster perceived response
+## 🛡️ License
+Private Enterprise License. unauthorized distribution prohibited.

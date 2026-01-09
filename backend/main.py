@@ -3,33 +3,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from typing import List, Optional
 import os
+import json
 import uvicorn
 import uuid
 from contextlib import asynccontextmanager
 
+from fastapi.security import OAuth2PasswordRequestForm
+from datetime import timedelta
+
 # Import local modules
 from backend.ingestion import DocumentProcessor
 from backend.rag_engine import RAGEngine
-from backend.models import ChatRequest, ChatResponse, DocumentResponse, LoginRequest, User
+from backend.models import ChatRequest, ChatResponse, DocumentResponse, LoginRequest, User, UserCreate, Token
+from backend.database import db
+from backend import auth
 
 # Global RAG Engine instance
 rag_engine = None
 doc_processor = DocumentProcessor()
 
-# Mock Users DB
-USERS_DB = {
-    "admin": "admin", # password
-    "user": "user"
-}
-USER_ROLES = {
-    "admin": "admin",
-    "user": "user"
-}
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Load models and index
     global rag_engine
+    print("Startup: Connecting to Database...")
+    db.connect()
+    
     print("Startup: Loading RAG Engine...")
     rag_engine = RAGEngine()
     yield
@@ -37,6 +36,8 @@ async def lifespan(app: FastAPI):
     print("Shutdown: Saving index...")
     if rag_engine:
         rag_engine.save_index()
+    print("Shutdown: Closing Database...")
+    db.close()
 
 app = FastAPI(title="Offline RAG API", lifespan=lifespan)
 
@@ -49,30 +50,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Auth ---
-def get_current_user(token: str = None):
-    # For this offline demo, we accept a simple username as the "token"
-    # In a real app, this would be a JWT bearer token
-    if not token:
-        return None
+# --- Auth Routes ---
+
+@app.post("/auth/register", response_model=User)
+async def register(user: UserCreate):
+    # Check if user exists
+    existing_user = await db.users.find_one({"email": user.email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
     
-    if token in USERS_DB:
-        return User(username=token, role=USER_ROLES[token])
-    return None
+    # Hash password
+    hashed_password = auth.get_password_hash(user.password)
+    
+    # Save to DB
+    user_dict = user.dict()
+    user_dict["hashed_password"] = hashed_password
+    del user_dict["password"]
+    
+    result = await db.users.insert_one(user_dict)
+    
+    return User(**user_dict)
 
-def require_admin(user: User = Depends(get_current_user)):
-    if not user or user.role != "admin":
+@app.post("/token", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    # Authenticate (form_data.username will be the email)
+    user = await db.users.find_one({"email": form_data.username})
+    if not user or not auth.verify_password(form_data.password, user["hashed_password"]):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin privileges required"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    return user
-
-@app.post("/auth/login")
-def login(creds: LoginRequest):
-    if creds.username in USERS_DB and USERS_DB[creds.username] == creds.password:
-        return {"token": creds.username, "role": USER_ROLES[creds.username]}
-    raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Create Token
+    access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = auth.create_access_token(
+        data={"sub": user["email"]}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
 
 # --- Routes ---
 
@@ -89,13 +104,12 @@ def health_check():
 @app.post("/upload")
 async def upload_document(
     file: UploadFile = File(...), 
-    user_token: Optional[str] = None # Expecting token in query or header in real app
+    current_user: User = Depends(auth.get_current_user)
 ):
-    # Manual check for demo simplicity if dependency is tricky with File upload
-    # But let's try to verify user if token provided
-    current_user = get_current_user(user_token)
-    if not current_user or current_user.role != "admin":
-         raise HTTPException(status_code=403, detail="Admin access required")
+    # Enterprise Access Control: Check if user is allowed to upload
+    # For now, all authenticated users can upload
+    if not current_user:
+         raise HTTPException(status_code=403, detail="Authentication required")
 
     global rag_engine
     try:
@@ -128,7 +142,7 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, current_user: User = Depends(auth.get_current_user)):
     global rag_engine
     if not rag_engine:
          raise HTTPException(status_code=503, detail="RAG Engine not initialized")
@@ -136,8 +150,13 @@ async def chat_endpoint(request: ChatRequest):
     response = rag_engine.generate_answer(request.message)
     return response
 
+def require_admin(current_user: User = Depends(auth.get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
 @app.get("/documents")
-def list_documents():
+def list_documents(current_user: User = Depends(auth.get_current_user)):
     # Return unique documents from RAG engine metadata
     global rag_engine
     if rag_engine:
@@ -156,23 +175,57 @@ def list_documents():
     return []
 
 @app.delete("/documents")
-def delete_all_documents(user: User = Depends(require_admin)):
+def delete_all_documents(current_user: User = Depends(require_admin)):
     global rag_engine
     if rag_engine:
         rag_engine.clear()
         return {"status": "cleared", "message": "All documents and indexes have been reset."}
     raise HTTPException(status_code=503, detail="RAG Engine not ready")
 
+@app.delete("/api/documents/{doc_id}")
+def delete_single_document(doc_id: str, current_user: User = Depends(require_admin)):
+    """
+    Delete a specific document and all its associated data.
+    Removes from: FAISS index and uploads folder.
+    """
+    global rag_engine
+    if not rag_engine:
+        raise HTTPException(status_code=503, detail="RAG Engine not ready")
+    
+    result = rag_engine.delete_document(doc_id)
+    
+    if result["status"] == "error":
+        raise HTTPException(status_code=404, detail=result["message"])
+    
+    return result
+
 @app.get("/ingestion/status")
 def get_ingestion_status():
     """
     Get real-time ingestion progress.
-    Frontend can poll this endpoint during file upload.
+    Checks both document processor and RAG engine status files.
     """
+    global rag_engine
+    
+    # Check RAG engine's processing status
+    if rag_engine:
+        status_path = os.path.join("models", "processing_status.json")
+        if os.path.exists(status_path):
+            try:
+                with open(status_path, "r") as f:
+                    rag_status = json.load(f)
+                # Return current status
+                if rag_status.get("status") in ["indexing", "ready"]:
+                    return rag_status
+            except:
+                pass
+    
+    # Fall back to document processor status
     return doc_processor.get_progress()
 
+
 @app.post("/chat/stream")
-def chat_stream_endpoint(request: ChatRequest):
+def chat_stream_endpoint(request: ChatRequest, current_user: User = Depends(auth.get_current_user)):
     global rag_engine
     if not rag_engine:
         # If engine not ready, yield a basic error stream
