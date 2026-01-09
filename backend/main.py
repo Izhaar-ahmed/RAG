@@ -163,6 +163,14 @@ def delete_all_documents(user: User = Depends(require_admin)):
         return {"status": "cleared", "message": "All documents and indexes have been reset."}
     raise HTTPException(status_code=503, detail="RAG Engine not ready")
 
+@app.get("/ingestion/status")
+def get_ingestion_status():
+    """
+    Get real-time ingestion progress.
+    Frontend can poll this endpoint during file upload.
+    """
+    return doc_processor.get_progress()
+
 @app.post("/chat/stream")
 def chat_stream_endpoint(request: ChatRequest):
     global rag_engine
